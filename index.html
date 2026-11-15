@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#2f5d50">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="English Room">
+<title>English Room</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <button class="home hidden" id="homeBtn" aria-label="사람들 목록">‹</button>
+    <div class="avatar" id="hAvatar" aria-hidden="true">EN</div>
+    <div class="who"><b id="hName">English Room</b><span id="status">대화할 사람을 골라 주세요</span></div>
+    <button class="gear" id="gearBtn" aria-label="설정과 기록">☰</button>
+  </header>
+
+  <main id="chatView">
+    <div id="homeView">
+      <div class="intro">
+        <h2 id="homeTitle">English Room</h2>
+        <p id="homeDesc"></p>
+      </div>
+      <div id="people"></div>
+    </div>
+    <div id="msgs"></div>
+  </main>
+
+  <main id="panelView" class="panel hidden"></main>
+
+  <div class="composer hidden" id="composer">
+    <div class="live" id="liveText"></div>
+    <div class="hints" id="hints"></div>
+    <div class="actions" id="actions">
+      <button data-a="topic">🔀 다른 주제</button>
+      <button data-a="practice">✍️ 연습하기</button>
+      <button data-a="easier">🐢 더 쉽게</button>
+      <button data-a="create" id="aCreate">👥 새 사람 만들기</button>
+      <button data-a="end">📓 대화 마치기</button>
+    </div>
+    <div class="voicebar">
+      <button class="side" id="kbBtn" aria-label="키보드로 입력">⌨️</button>
+      <div class="micwrap">
+        <button class="mic" id="micBtn" aria-label="말하기"><span id="micIcon">🎤</span></button>
+        <div class="miclabel" id="micLabel">눌러서 말하기</div>
+      </div>
+      <button class="side lang" id="langBtn" aria-label="인식 언어 바꾸기">EN</button>
+    </div>
+    <div class="typerow hidden" id="typeRow">
+      <textarea id="input" rows="1" placeholder="입력해서 보내기 (한국어도 괜찮아요)"></textarea>
+      <button class="send" id="sendBtn" aria-label="보내기">➤</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
