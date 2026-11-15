@@ -90,6 +90,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     apiKey: "", model: "", autoSpeak: true, autoSend: true, handsFree: false, rate: 1.0, recLang: "en-US", voices: {}
   }, Store.get("settings") || {});
   const saveSettings = () => Store.set("settings", settings);
+  if (!settings.modelChosen && settings.model && !/flash-lite/.test(settings.model)) { settings.model = ""; saveSettings(); }
 
   // =====================================================================
   // State
@@ -121,7 +122,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   const API = "https://generativelanguage.googleapis.com/v1beta";
 
   async function listModels(key){
-    const r = await fetch(`${API}/models?pageSize=200`, { headers: { "x-goog-api-key": key } });
+    const r = await fetchWithTimeout(`${API}/models?pageSize=200`, { headers: { "x-goog-api-key": key } }, 20000);
     if (!r.ok) throw await apiError(r);
     const j = await r.json();
     return (j.models || [])
@@ -132,8 +133,9 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   function pickDefaultModel(names){
     const ver = n => { const m = n.match(/gemini-(\d+(?:\.\d+)?)/); return m ? parseFloat(m[1]) : 0; };
     const score = n => ver(n) * 10 - (/preview/.test(n) ? 3 : 0) - (/lite/.test(n) ? 1 : 0) - (/\d{3,}/.test(n.replace(/gemini-\d+(\.\d+)?/, "")) ? 1 : 0);
+    const lite = names.filter(n => /flash-lite/.test(n));
     const flash = names.filter(n => /flash/.test(n));
-    const pool = flash.length ? flash : names;
+    const pool = lite.length ? lite : flash.length ? flash : names;
     return pool.sort((a, b) => score(b) - score(a))[0] || "";
   }
   async function apiError(r){
@@ -153,45 +155,88 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     return null;
   }
 
+  let modelCache = null;          // names from the last model list
+  let currentAbort = null;        // lets the user cancel a request in flight
+  const TIMEOUT_MS = 30000;
+
+  function fetchWithTimeout(url, opts, ms){
+    const ctl = new AbortController();
+    currentAbort = ctl;
+    const timer = setTimeout(() => { ctl.timedOut = true; ctl.abort(); }, ms);
+    return fetch(url, Object.assign({}, opts, { signal: ctl.signal }))
+      .catch(e => {
+        if (ctl.timedOut) { const t = new Error("timeout"); t.code = "timeout"; throw t; }
+        if (e && e.name === "AbortError") { const a = new Error("cancelled"); a.code = "cancelled"; throw a; }
+        throw e;
+      })
+      .finally(() => { clearTimeout(timer); if (currentAbort === ctl) currentAbort = null; });
+  }
+  function cancelRequest(){ if (currentAbort) currentAbort.abort(); }
+
+  async function ensureModel(){
+    if (settings.model) return;
+    modelCache = await listModels(settings.apiKey);
+    settings.model = pickDefaultModel(modelCache); saveSettings();
+    if (!settings.model) { const e = new Error("no model"); e.code = "bad_model"; throw e; }
+  }
+  async function fasterModel(){
+    try { if (!modelCache) modelCache = await listModels(settings.apiKey); } catch { return null; }
+    const lite = modelCache.filter(n => /flash-lite/.test(n) && n !== settings.model);
+    return lite.length ? pickDefaultModel(lite) : null;
+  }
+
   async function llm(system, messages){
     if (!settings.apiKey) { const e = new Error("no key"); e.code = "no_key"; throw e; }
-    if (!settings.model) {
-      settings.model = pickDefaultModel(await listModels(settings.apiKey)); saveSettings();
-      if (!settings.model) { const e = new Error("no model"); e.code = "bad_model"; throw e; }
-    }
+    await ensureModel();
     const body = {
       systemInstruction: { parts: [{ text: system }] },
       contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
       generationConfig: { responseMimeType: "application/json", temperature: 0.9 }
     };
-    // Conversation needs speed, not deep reasoning: keep the model's "thinking" as light as it allows.
-    const tc = thinkingFor(settings.model);
-    if (tc) body.generationConfig.thinkingConfig = tc;
-    let r;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      r = await fetch(`${API}/models/${encodeURIComponent(settings.model)}:generateContent`, {
-        method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey }, body: JSON.stringify(body)
-      });
+    let triedFaster = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      // Conversation needs speed, not deep reasoning: keep the model's "thinking" as light as it allows.
+      const tc = thinkingFor(settings.model);
+      if (tc) body.generationConfig.thinkingConfig = tc; else delete body.generationConfig.thinkingConfig;
+      let r;
+      try {
+        r = await fetchWithTimeout(`${API}/models/${encodeURIComponent(settings.model)}:generateContent`, {
+          method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey }, body: JSON.stringify(body)
+        }, TIMEOUT_MS);
+      } catch (e) {
+        if (e.code === "timeout" && !triedFaster) {
+          triedFaster = true;
+          const f = await fasterModel();
+          if (f) { const old = settings.model; settings.model = f; saveSettings(); onModelSwitched && onModelSwitched(old, f); continue; }
+        }
+        throw e;
+      }
       if (r.status === 400 && body.generationConfig.thinkingConfig) {
         const msg = await r.clone().text();
-        if (/think/i.test(msg)) { delete body.generationConfig.thinkingConfig; noThinkingCfg[settings.model] = true; continue; }
+        if (/think/i.test(msg)) { noThinkingCfg[settings.model] = true; continue; }
       }
-      if (r.status !== 503 && r.status !== 500) break;
-      await new Promise(res => setTimeout(res, 1200 + Math.random() * 800));
+      if (r.status === 500 || r.status === 503) { await new Promise(res => setTimeout(res, 1200 + Math.random() * 800)); continue; }
+      if (!r.ok) throw await apiError(r);
+      const j = await r.json();
+      const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
+      const text = parts.filter(p => !p.thought).map(p => p.text || "").join("");
+      if (!text) { const e = new Error((j.promptFeedback && j.promptFeedback.blockReason) || (j.candidates && j.candidates[0] && j.candidates[0].finishReason) || "empty"); e.code = "api"; throw e; }
+      return text;
     }
-    if (!r.ok) throw await apiError(r);
-    const j = await r.json();
-    const parts = (j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts) || [];
-    const text = parts.filter(p => !p.thought).map(p => p.text || "").join("");
-    if (!text) { const e = new Error((j.promptFeedback && j.promptFeedback.blockReason) || "empty"); e.code = "api"; throw e; }
-    return text;
+    const e = new Error("구글 서버가 응답하지 않아요"); e.code = "api"; throw e;
   }
+  let onModelSwitched = null;
+
+  onModelSwitched = (from, to) => {
+    const d = el("div", "meta-chip"); d.appendChild(el("span", null, `응답이 늦어서 더 빠른 모델(${to})로 바꿨어요`)); msgsEl.appendChild(d); scrollDown();
+  };
 
   function errorText(e){
     if (!e) return "답변을 가져오지 못했어요.";
     if (e.code === "no_key") return "먼저 Gemini API 키를 넣어 주세요 (☰ 메뉴 → 설정).";
     if (e.code === "bad_key") return "API 키가 맞지 않거나 권한이 없어요. ☰ 메뉴에서 키를 확인해 주세요.";
     if (e.code === "rate_limited") return "무료 사용량 한도에 잠시 걸렸어요. 1분쯤 뒤에 다시 시도해 주세요. 자주 그러면 ☰ 메뉴에서 더 가벼운 모델(flash-lite)로 바꿔 보세요.";
+    if (e.code === "timeout") return `구글에서 30초 넘게 답이 없어요 (모델: ${settings.model}). 잠시 뒤 다시 시도하거나 ☰ 메뉴에서 모델을 바꿔 보세요.`;
     if (e.code === "bad_model") return `모델(${settings.model})을 쓸 수 없어요. ☰ 메뉴 → 설정에서 다른 모델을 골라 주세요.`;
     if (e instanceof TypeError) return "인터넷 연결을 확인해 주세요.";
     return "답변을 가져오지 못했어요. (" + (e.message || "").slice(0, 120) + ")";
@@ -469,7 +514,8 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
       teacherTurn(first ? "begin_first" : "begin_regular");
     }
   }
-  $("homeBtn").addEventListener("click", () => { if (!busy) renderHome(); });
+  $("homeBtn").addEventListener("click", async () => { if (busy) { cancelRequest(); await waitIdle(); } renderHome(); });
+  function waitIdle(){ return new Promise(res => { const t = setInterval(() => { if (!busy) { clearInterval(t); res(); } }, 50); setTimeout(() => { clearInterval(t); res(); }, 3000); }); }
 
   // =====================================================================
   // Prompt building
@@ -520,6 +566,8 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     const typing = el("div", "row t");
     typing.innerHTML = '<div class="bubble typing"><i></i><i></i><i></i></div>';
     msgsEl.appendChild(typing); scrollDown();
+    const t0 = Date.now();
+    const tick = setInterval(() => { if (busy) $("status").textContent = `생각하는 중… ${Math.round((Date.now() - t0) / 1000)}초`; }, 1000);
     let bubble = null, m = null;
     try {
       const { system, messages } = buildConversation(action);
@@ -545,8 +593,9 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
       Store.set(sessionKey(who), session);
     } catch (e) {
       typing.remove();
-      showError(errorText(e), e && e.code !== "no_key" && e.code !== "bad_key" ? () => teacherTurn(action) : null);
+      if (!(e && e.code === "cancelled")) showError(errorText(e), e && e.code !== "no_key" && e.code !== "bad_key" ? () => teacherTurn(action) : null);
     } finally {
+      clearInterval(tick);
       setBusy(false);
     }
     if (m && settings.autoSpeak && CHAR === who && inChat) {
@@ -728,10 +777,27 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     msgsEl.appendChild(d); scrollDown();
   }
 
+  async function resetConversation(){
+    const b = document.querySelector('#actions button[data-a="reset"]');
+    if (!b.dataset.armed) {
+      b.dataset.armed = "1"; b.textContent = "🔄 정말 새로 시작할까요? 한 번 더 누르기";
+      setTimeout(() => { delete b.dataset.armed; b.textContent = "🔄 새로 시작"; }, 4000);
+      return;
+    }
+    delete b.dataset.armed; b.textContent = "🔄 새로 시작";
+    stopSpeaking(); stopListening(true);
+    if (busy) { cancelRequest(); await waitIdle(); }
+    session = { messages: [], startedAt: today() };
+    Store.set(sessionKey(), session);
+    msgsEl.innerHTML = ""; renderHints([]);
+    const first = CHAR.builtin ? !(mem.profile && mem.profile.name) : story.entries.length === 0;
+    teacherTurn(first ? "begin_first" : "begin_regular");
+  }
+
   function setBusy(v){
     busy = v;
     $("sendBtn").disabled = v;
-    document.querySelectorAll("#actions button").forEach(b => b.disabled = v);
+    document.querySelectorAll("#actions button").forEach(b => b.disabled = v && b.dataset.a !== "reset");
     $("status").textContent = v ? "생각하는 중…" : (CHAR.tagline_ko || CHAR.role_ko || "");
     setMic(v ? "thinking" : "idle");
   }
@@ -762,6 +828,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   document.querySelectorAll("#actions button").forEach(b => b.addEventListener("click", async () => {
     unlockAudio();
     const a = b.dataset.a;
+    if (a === "reset") { resetConversation(); return; }
     if (a !== "end") { stopListening(true); studentSend("", a); return; }
     if (busy) return;
     if (session.messages.filter(m => m.role === "student" && !m.meta).length < 2) { showError("조금 더 대화한 뒤에 마칠 수 있어요.", null); return; }
@@ -828,7 +895,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
       if (settings.model && !list.includes(settings.model)) { const o = el("option", null, settings.model); o.value = settings.model; msel.prepend(o); }
       msel.value = settings.model;
     };
-    msel.onchange = () => { settings.model = msel.value; saveSettings(); };
+    msel.onchange = () => { settings.model = msel.value; settings.modelChosen = true; saveSettings(); };
     row("모델", msel, "flash 계열은 무료 사용량 안에서 쓸 수 있어요. 한도에 자주 걸리면 flash-lite를 골라 보세요.");
     async function refreshModels(){
       fillModels(null);
