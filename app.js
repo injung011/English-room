@@ -382,8 +382,17 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     ol.appendChild(el("li", null, "“Create API key”를 눌러 키를 만들고 복사해요."));
     ol.appendChild(el("li", null, "아래에 붙여 넣고 저장을 눌러요."));
     c.appendChild(ol);
-    const inp = el("input"); inp.type = "password"; inp.placeholder = "AIza로 시작하는 키"; inp.autocomplete = "off";
+    const inp = el("input"); inp.type = "text"; inp.placeholder = "여기에 키 붙여넣기"; inp.autocomplete = "off";
+    inp.setAttribute("autocapitalize", "off"); inp.setAttribute("autocorrect", "off"); inp.spellcheck = false;
     c.appendChild(inp);
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      const pb = el("button", "btn ghost", "📋 복사한 키 붙여넣기"); pb.style.cssText = "width:100%;margin-bottom:10px";
+      pb.onclick = async () => {
+        try { const t = (await navigator.clipboard.readText() || "").trim(); if (t) { inp.value = t; pb.textContent = "붙여넣었어요 ✓"; } else pb.textContent = "클립보드가 비어 있어요"; }
+        catch { pb.textContent = "붙여넣기를 허용해 주세요 (또는 칸을 길게 눌러 붙여넣기)"; }
+      };
+      c.appendChild(pb);
+    }
     const msg = el("div", null, "키는 이 휴대폰에만 저장되고, 구글 Gemini에 요청할 때만 쓰여요."); msg.style.cssText = "font-size:12.5px;color:var(--muted);margin-bottom:10px";
     c.appendChild(msg);
     const b = el("button", "btn primary", "저장하고 시작하기");
@@ -792,7 +801,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     } else s.appendChild(el("div", "sub", "이 브라우저에서 영어 음성을 찾지 못했어요."));
 
     // api key + model
-    const key = document.createElement("input"); key.type = "password"; key.value = settings.apiKey; key.placeholder = "Gemini API 키";
+    const key = document.createElement("input"); key.type = "text"; key.autocomplete = "off"; key.spellcheck = false; key.setAttribute("autocapitalize", "off"); key.value = settings.apiKey; key.placeholder = "Gemini API 키";
     key.onchange = () => { settings.apiKey = key.value.trim(); settings.model = ""; saveSettings(); refreshModels(); };
     row("API 키", key);
     const msel = document.createElement("select");
