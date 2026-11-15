@@ -191,7 +191,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     await ensureModel();
     const body = {
       systemInstruction: { parts: [{ text: system }] },
-      contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
+      contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: m.parts || [{ text: m.content }] })),
       generationConfig: { responseMimeType: "application/json", temperature: 0.9 }
     };
     let triedFaster = false;
@@ -316,7 +316,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   const MAX_LISTEN_MS = 3 * 60 * 1000;
   const joinText = (...xs) => xs.map(x => (x || "").trim()).filter(Boolean).join(" ");
 
-  function startListening(){
+  function startBrowser(){
     if (!SR || listening || busy) return;
     stopSpeaking();
     accText = input.value.trim();   // keep anything already in the box, so they can add more
@@ -389,7 +389,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     $("liveText").textContent = "고칠 곳이 있으면 고치고 ➤ 보내기를 누르세요. 🎤를 누르면 이어서 말할 수 있어요.";
   }
 
-  function stopListening(cancel){
+  function stopBrowser(cancel){
     if (!listening) return;
     cancelListen = !!cancel;
     wantListen = false;
@@ -405,21 +405,158 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     return t;
   }
 
+
+  // =====================================================================
+  // Voice input, mode "gemini" (default): record raw audio silently, then have
+  // Gemini write down exactly what was said (mistakes included). No system beeps,
+  // no auto-correction by the phone's recognizer.
+  // =====================================================================
+  const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
+  const useGeminiSTT = () => settings.sttMode !== "browser" && canRecord;
+  let recCtx = null, recStream = null, recSrc = null, recProc = null, recChunks = [], recRate = 48000, recording = false, recT0 = 0, recTimer = null, recLevel = 0, sendAfterTranscribe = false, transcribing = false;
+
+  async function startRecording(){
+    if (recording || busy || transcribing) return;
+    stopSpeaking();
+    recChunks = []; recLevel = 0; sendAfterTranscribe = false;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    try {
+      recCtx = new AC();                      // created inside the tap, so phones allow it
+      recStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+    } catch (e) {
+      cleanupRecorder();
+      showError("마이크를 쓸 수 없어요. 크롬 주소창 왼쪽 아이콘 → 권한 → 마이크를 허용해 주세요. (아이폰은 설정 → Safari → 마이크)");
+      return;
+    }
+    if (recCtx.state === "suspended") { try { await recCtx.resume(); } catch {} }
+    recRate = recCtx.sampleRate;
+    recSrc = recCtx.createMediaStreamSource(recStream);
+    recProc = recCtx.createScriptProcessor(4096, 1, 1);
+    recProc.onaudioprocess = e => {
+      if (!recording) return;
+      const d = e.inputBuffer.getChannelData(0);
+      recChunks.push(new Float32Array(d));
+      let sum = 0; for (let i = 0; i < d.length; i += 4) sum += d[i] * d[i];
+      recLevel = Math.min(1, Math.sqrt(sum / (d.length / 4)) * 6);
+    };
+    recSrc.connect(recProc); recProc.connect(recCtx.destination);
+    recording = true; recT0 = Date.now();
+    setMic("listening");
+    renderRecMeter();
+    recTimer = setInterval(() => { renderRecMeter(); if (Date.now() - recT0 > MAX_LISTEN_MS) stopRecording(false); }, 200);
+  }
+
+  function renderRecMeter(){
+    const sec = Math.floor((Date.now() - recT0) / 1000);
+    const live = $("liveText"); live.innerHTML = "";
+    const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:10px;justify-content:center;font-style:normal";
+    row.appendChild(el("span", null, `🔴 녹음 중 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`));
+    const bar = el("span"); bar.style.cssText = "display:inline-block;width:90px;height:6px;border-radius:3px;background:var(--line);overflow:hidden";
+    const fill = el("span"); fill.style.cssText = `display:block;height:100%;width:${Math.round(recLevel * 100)}%;background:var(--green);transition:width .15s`;
+    bar.appendChild(fill); row.appendChild(bar);
+    live.appendChild(row);
+    live.appendChild(el("div", null, "천천히 말해도 괜찮아요. 다 말하면 ■")).style.cssText = "font-size:12.5px;margin-top:2px";
+  }
+
+  function cleanupRecorder(){
+    clearInterval(recTimer); recTimer = null;
+    try { recProc && recProc.disconnect(); } catch {} try { recSrc && recSrc.disconnect(); } catch {}
+    try { recStream && recStream.getTracks().forEach(t => t.stop()); } catch {}
+    try { recCtx && recCtx.close(); } catch {}
+    recCtx = recStream = recSrc = recProc = null;
+  }
+
+  async function stopRecording(cancel){
+    if (!recording) return;
+    recording = false;
+    const chunks = recChunks, rate = recRate; recChunks = [];
+    cleanupRecorder();
+    $("liveText").textContent = "";
+    setMic(busy ? "thinking" : "idle");
+    if (cancel) return;
+    const total = chunks.reduce((a, c) => a + c.length, 0);
+    if (total < rate * 0.5) { $("liveText").textContent = "너무 짧아요. 다시 눌러서 말해 주세요."; return; }
+    transcribing = true; setMic("transcribing");
+    $("liveText").textContent = "받아 적는 중…";
+    try {
+      const b64 = await wavBase64(chunks, rate);
+      const said = await transcribe(b64);
+      input.value = joinText(input.value, said); autosize();
+      $("liveText").textContent = "";
+      if (!said) { $("liveText").textContent = "잘 못 들었어요. 다시 눌러서 말해 주세요."; return; }
+      if (settings.autoSend || sendAfterTranscribe) { transcribing = false; sendTyped(); return; }
+      $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("on");
+      $("liveText").textContent = "고칠 곳이 있으면 고치고 ➤ 보내기를 누르세요. 🎤를 누르면 이어서 말할 수 있어요.";
+    } catch (e) {
+      $("liveText").textContent = "";
+      showError("받아 적지 못했어요. " + errorText(e));
+    } finally {
+      transcribing = false; sendAfterTranscribe = false;
+      setMic(busy ? "thinking" : "idle");
+    }
+  }
+
+  // Float32 chunks at the device rate -> 16 kHz mono 16-bit WAV, base64.
+  function wavBase64(chunks, rate){
+    const target = 16000, ratio = rate / target;
+    const total = chunks.reduce((a, c) => a + c.length, 0);
+    const all = new Float32Array(total); let o = 0; chunks.forEach(c => { all.set(c, o); o += c.length; });
+    const n = Math.floor(total / ratio);
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const w = (p, str) => { for (let i = 0; i < str.length; i++) v.setUint8(p + i, str.charCodeAt(i)); };
+    w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE"); w(12, "fmt "); v.setUint32(16, 16, true);
+    v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, target, true); v.setUint32(28, target * 2, true);
+    v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, "data"); v.setUint32(40, n * 2, true);
+    for (let i = 0; i < n; i++) {
+      const a = Math.floor(i * ratio), b = Math.min(total, Math.floor((i + 1) * ratio));
+      let sum = 0; for (let j = a; j < b; j++) sum += all[j];
+      const x = Math.max(-1, Math.min(1, sum / Math.max(1, b - a)));
+      v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
+    }
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(",")[1]);
+      fr.onerror = () => rej(fr.error);
+      fr.readAsDataURL(new Blob([buf], { type: "audio/wav" }));
+    });
+  }
+
+  const TRANSCRIBE_RULES = `You are a verbatim transcriber for a Korean adult who is learning English.
+Write down EXACTLY what the speaker says, word for word.
+- Keep every grammar mistake, wrong word form, missing article, wrong tense, repetition, and false start exactly as spoken. Do NOT correct, improve, complete, or tidy anything.
+- Keep fillers such as "um", "uh", "you know".
+- If they say something in Korean, write that part in Korean (Hangul).
+- Use normal punctuation only where the speaker clearly paused or finished a sentence.
+- If there is no intelligible speech, return an empty string.
+Return ONLY JSON: {"text": "..."}`;
+
+  async function transcribe(b64){
+    const raw = await llm(TRANSCRIBE_RULES, [{ role: "user", parts: [{ inlineData: { mimeType: "audio/wav", data: b64 } }, { text: "Transcribe this recording verbatim." }] }]);
+    const o = parseJSON(raw);
+    return ((o && typeof o.text === "string") ? o.text : String(raw || "")).trim();
+  }
+
+  // ---------- dispatchers used by the rest of the app ----------
+  function isListening(){ return recording || listening; }
+  function startListening(){ if (useGeminiSTT()) startRecording(); else startBrowser(); }
+  function stopListening(cancel){ if (recording) stopRecording(cancel); else stopBrowser(cancel); }
+
   function setMic(state){
     const b = $("micBtn"), l = $("micLabel"), i = $("micIcon");
     b.classList.remove("listening", "speaking");
     b.disabled = false;
-    if (!SR) { b.disabled = true; i.textContent = "🎤"; l.textContent = "음성 인식 미지원 · 키보드 사용"; return; }
+    if (!SR && !canRecord) { b.disabled = true; i.textContent = "🎤"; l.textContent = "음성 입력 미지원 · 키보드 사용"; return; }
     if (state === "listening") { b.classList.add("listening"); i.textContent = "■"; l.textContent = "듣는 중 · 다 말하면 누르기"; }
     else if (state === "speaking") { b.classList.add("speaking"); i.textContent = "🔊"; l.textContent = "말하는 중 · 누르면 끊고 말하기"; }
     else if (state === "thinking") { b.disabled = true; i.textContent = "…"; l.textContent = "생각하는 중"; }
+    else if (state === "transcribing") { b.disabled = true; i.textContent = "✍️"; l.textContent = "받아 적는 중"; }
     else { i.textContent = "🎤"; l.textContent = "눌러서 말하기"; }
   }
 
   $("micBtn").addEventListener("click", () => {
     unlockAudio();
-    if (listening) { stopListening(false); return; }
-    if (busy) return;
+    if (isListening()) { stopListening(false); return; }
+    if (busy || transcribing) return;
     startListening();
   });
   $("langBtn").addEventListener("click", () => {
@@ -867,9 +1004,11 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   });
   function sendTyped(){
     unlockAudio();
+    if (recording) { sendAfterTranscribe = true; stopRecording(false); return; }
+    if (transcribing) { sendAfterTranscribe = true; return; }
     const v = listening ? takeHeardNow() : input.value;
     input.value = ""; autosize(); $("liveText").textContent = "";
-    if (SR) { $("typeRow").classList.add("hidden"); $("kbBtn").classList.remove("on"); }
+    if (SR || canRecord) { $("typeRow").classList.add("hidden"); $("kbBtn").classList.remove("on"); }
     studentSend(v);
   }
   $("sendBtn").addEventListener("click", sendTyped);
@@ -912,6 +1051,13 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     const chk = (key, after) => { const c = document.createElement("input"); c.type = "checkbox"; c.checked = !!settings[key]; c.onchange = () => { settings[key] = c.checked; saveSettings(); after && after(); }; return c; };
 
     row("대답 끝나면 소리로 읽어 주기", chk("autoSpeak"));
+    if (canRecord && SR) {
+      const sel = document.createElement("select");
+      [["gemini", "녹음 → Gemini가 받아 적기 (조용하고 들린 그대로)"], ["browser", "휴대폰 음성 인식 (빠르지만 띠링 소리, 문장을 다듬음)"]].forEach(([v, t]) => { const o = el("option", null, t); o.value = v; sel.appendChild(o); });
+      sel.value = settings.sttMode === "browser" ? "browser" : "gemini";
+      sel.onchange = () => { settings.sttMode = sel.value; saveSettings(); updateSttUI(); };
+      row("말 받아 적기", sel);
+    }
     row("■ 누르면 바로 보내기", chk("autoSend"), "끄면(기본) 말한 내용이 입력창에 들어가고, 확인한 뒤 ➤ 를 눌러 보내요.");
     row("핸즈프리 (읽어 준 뒤 바로 듣기)", chk("handsFree"), "상대방 말이 끝나면 마이크가 자동으로 켜져요. 아이폰에서는 안 될 수 있어요.");
     const rl = el("span", null, `말하기 속도 ${settings.rate.toFixed(2)}`);
@@ -1039,7 +1185,9 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   // =====================================================================
   updateLangBtn();
   setMic("idle");
-  if (!SR) { $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("hidden"); $("langBtn").classList.add("hidden"); }
+  if (!SR && !canRecord) { $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("hidden"); }
+  function updateSttUI(){ $("langBtn").classList.toggle("hidden", useGeminiSTT() || !SR); }
+  updateSttUI();
   if (!synth) settings.autoSpeak = false;
   renderHome();
   if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
