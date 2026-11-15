@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=9">
+<link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
 <div class="app">
@@ -36,11 +36,16 @@
 
   <main id="soloView" class="solo hidden">
     <div class="segs" id="soloTabs">
-      <button data-m="free" class="on">자유롭게 말하기</button>
-      <button data-m="repeat">문장 따라 말하기</button>
+      <button data-m="free" class="on">자유롭게</button>
+      <button data-m="repeat">따라 말하기</button>
+      <button data-m="ko2en">영작하기</button>
     </div>
-    <div id="soloTarget" class="target hidden"></div>
-    <div id="soloResults"></div>
+    <div class="histbar"><button id="soloHistBtn" class="mini">📜 지난 연습</button></div>
+    <div id="soloWork">
+      <div id="soloTarget" class="target hidden"></div>
+      <div id="soloResults"></div>
+    </div>
+    <div id="soloHist" class="hidden"></div>
   </main>
 
   <main id="panelView" class="panel hidden"></main>
@@ -80,6 +85,6 @@
     </div>
   </div>
 </div>
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

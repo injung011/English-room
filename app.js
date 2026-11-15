@@ -1260,53 +1260,76 @@ Return ONLY one JSON object:
     $("chatView").classList.add("hidden"); $("homeBtn").classList.remove("hidden");
     $("soloView").classList.remove("hidden"); $("soloBar").classList.remove("hidden");
     $("soloResults").innerHTML = "";
-    $("soloLive").textContent = canRecord ? "🎤를 누르고 영어로 아무거나 말해 보세요. 다 말하면 ■" : "이 브라우저에서는 녹음을 쓸 수 없어요.";
+    updateHistBtn();
     setSoloMode(soloMode);
+    if (!canRecord) $("soloLive").textContent = "이 브라우저에서는 녹음을 쓸 수 없어요.";
     setMic("idle");
   }
 
+  const MODE_LABEL = { free: "자유롭게", repeat: "따라 말하기", ko2en: "영작" };
+  const SOLO_HINT = { free: "🎤를 누르고 영어로 아무거나 말해 보세요. 다 말하면 ■", repeat: "문장을 보고 🎤를 눌러 소리 내어 말해 보세요", ko2en: "한국어 문장을 영어로 바꿔서 말해 보세요. 다 말하면 ■" };
+  let soloTargets = { repeat: null, ko2en: null };
   function setSoloMode(m){
-    soloMode = m;
+    if (soloMode !== m) { $("soloResults").innerHTML = ""; }
+    soloMode = m; soloTarget = soloTargets[m] || null;
     document.querySelectorAll("#soloTabs button").forEach(b => b.classList.toggle("on", b.dataset.m === m));
-    if (m === "repeat") { if (!soloTarget) newTarget(); else renderTarget(); }
-    else { $("soloTarget").classList.add("hidden"); }
+    showSoloHistory(false);
+    if (m === "free") $("soloTarget").classList.add("hidden");
+    else if (!soloTarget) newTarget(); else renderTarget();
+    if (!recording && !transcribing) $("soloLive").textContent = SOLO_HINT[m];
   }
   document.querySelectorAll("#soloTabs button").forEach(b => b.addEventListener("click", () => { unlockAudio(); setSoloMode(b.dataset.m); }));
 
   function renderTarget(){
     const t = $("soloTarget"); t.innerHTML = ""; t.classList.remove("hidden");
     if (!soloTarget) { t.appendChild(el("div", "empty", "문장을 만드는 중…")); return; }
-    t.appendChild(el("div", "lbl", "이 문장을 소리 내어 말해 보세요"));
-    t.appendChild(el("div", "target-en", soloTarget.sentence));
-    if (soloTarget.ko) t.appendChild(el("div", "target-ko", soloTarget.ko));
     const row = el("div", "tools");
-    const l = el("button", null, "🔊 들어 보기"); l.onclick = () => { unlockAudio(); speakWith(soloTarget.sentence, TEACHER); };
-    const n = el("button", null, "🔄 다른 문장"); n.onclick = () => newTarget();
-    row.append(l, n); t.appendChild(row);
+    if (soloMode === "ko2en") {
+      t.appendChild(el("div", "lbl", "이 말을 영어로 해 보세요"));
+      t.appendChild(el("div", "target-en ko-big", soloTarget.ko));
+      const ans = el("div", "target-ko hidden", "예시 답: " + soloTarget.sentence);
+      t.appendChild(ans);
+      const show = el("button", null, "👀 예시 답 보기");
+      show.onclick = () => { const h = ans.classList.toggle("hidden"); show.textContent = h ? "👀 예시 답 보기" : "예시 답 숨기기"; if (!h) { unlockAudio(); speakWith(soloTarget.sentence, TEACHER); } };
+      row.appendChild(show);
+    } else {
+      t.appendChild(el("div", "lbl", "이 문장을 소리 내어 말해 보세요"));
+      t.appendChild(el("div", "target-en", soloTarget.sentence));
+      if (soloTarget.ko) t.appendChild(el("div", "target-ko", soloTarget.ko));
+      const l = el("button", null, "🔊 들어 보기"); l.onclick = () => { unlockAudio(); speakWith(soloTarget.sentence, TEACHER); };
+      row.appendChild(l);
+    }
+    const n = el("button", null, "🔄 다른 문장"); n.onclick = () => { $("soloResults").innerHTML = ""; newTarget(); };
+    row.appendChild(n); t.appendChild(row);
   }
 
   async function newTarget(){
-    soloTarget = null; renderTarget();
+    const forMode = soloMode;
+    soloTarget = null; soloTargets[forMode] = null; renderTarget();
     const lvl = (mem.english && mem.english.level) || "A2-B1";
     const facts = (mem.profile && mem.profile.facts || []).slice(0, 12).join("; ");
     const learned = (mem.english && mem.english.learned || []).slice(-10).join("; ");
-    const recent = soloLog().items.slice(-8).map(x => x.target).filter(Boolean).join(" | ");
+    const recent = soloLog().items.slice(-8).map(x => x.ko || x.target).filter(Boolean).join(" | ");
     try {
       const o = parseJSON(await llm(`You create one practice sentence for a Korean adult learning English to read aloud. Return ONLY JSON {"sentence": "...", "ko": "natural Korean translation"}.`,
         [{ role: "user", content: `Learner level: ${lvl}. About the learner: ${facts || "unknown"}. Recently learned expressions: ${learned || "none"}. Avoid these recent sentences: ${recent || "none"}.
-Write ONE natural, everyday spoken sentence (8-15 words) the learner could really use, ideally about their own life. Often include sounds Korean speakers find hard (th, r vs l, f vs p, v vs b, z, final consonants, word stress).` }]));
-      soloTarget = o && o.sentence ? { sentence: o.sentence, ko: o.ko || "" } : { sentence: "I think the weather will be really nice this weekend.", ko: "이번 주말에는 날씨가 정말 좋을 것 같아요." };
-    } catch (e) {
-      soloTarget = { sentence: "I think the weather will be really nice this weekend.", ko: "이번 주말에는 날씨가 정말 좋을 것 같아요." };
-    }
-    if (soloMode === "repeat") renderTarget();
+${forMode === "ko2en"
+  ? "This is a TRANSLATION exercise: the learner will see only the Korean and must say it in English. Write ONE natural everyday Korean sentence (something they'd really want to say, ideally about their own life) whose English is at their level, 6-14 words in English. Put the Korean in \"ko\" and one natural English answer in \"sentence\"."
+  : "Write ONE natural, everyday spoken sentence (8-15 words) the learner could really use, ideally about their own life. Often include sounds Korean speakers find hard (th, r vs l, f vs p, v vs b, z, final consonants, word stress)."}` }]));
+      soloTarget = o && o.sentence ? { sentence: o.sentence, ko: o.ko || "" } : null;
+    } catch (e) { soloTarget = null; }
+    if (!soloTarget) soloTarget = forMode === "ko2en"
+      ? { sentence: "I was so busy at work today that I skipped lunch.", ko: "오늘 회사에서 너무 바빠서 점심을 걸렀어요." }
+      : { sentence: "I think the weather will be really nice this weekend.", ko: "이번 주말에는 날씨가 정말 좋을 것 같아요." };
+    soloTargets[forMode] = soloTarget;
+    if (soloMode === forMode) renderTarget();
   }
 
   $("soloMic").addEventListener("click", () => {
     unlockAudio();
     if (recording) { stopRecording(false); return; }
     if (transcribing || !canRecord) return;
-    if (soloMode === "repeat" && !soloTarget) return;
+    if (soloMode !== "free" && !soloTarget) return;
     recMode = "solo";
     startRecording();
   });
@@ -1314,28 +1337,34 @@ Write ONE natural, everyday spoken sentence (8-15 words) the learner could reall
   async function soloAnalyzeRecording(chunks, rate){
     transcribing = true; setMic("transcribing");
     $("soloLive").textContent = "까다롭게 듣고 분석하는 중…";
-    const target = soloMode === "repeat" && soloTarget ? soloTarget.sentence : null;
+    const mode = soloMode;
+    const target = mode === "repeat" && soloTarget ? soloTarget.sentence : null;
+    const ko = mode === "ko2en" && soloTarget ? soloTarget.ko : null;
+    const task = target ? `TARGET sentence the learner tried to say: "${target}"`
+      : ko ? `TRANSLATION TASK: the learner was shown this Korean and tried to say it in English: "${ko}". One natural answer: "${soloTarget.sentence}". Judge whether their English conveys the meaning. For "better", keep the learner's own wording and structure where it is acceptable and fix only what is wrong; if theirs was already natural, "better" can equal it. Put grammar/word-choice points in "fixes". Also add "meaning_ok": true/false and "meaning_ko": one short Korean sentence about whether the meaning came across.`
+      : "No target: the learner spoke freely.";
     try {
       const b64 = await wavBase64(chunks, rate);
       const myUrl = lastWavUrl;
       const raw = await llm(SOLO_RULES, [{ role: "user", parts: [
         { inlineData: { mimeType: "audio/wav", data: b64 } },
-        { text: target ? `TARGET sentence the learner tried to say: "${target}"` : "No target: the learner spoke freely." }
+        { text: task }
       ] }]);
       const o = parseJSON(raw);
       if (!o || typeof o.heard !== "string") throw new Error("분석 결과를 읽지 못했어요");
-      $("soloLive").textContent = "";
-      renderSoloResult(o, target, myUrl);
+      $("soloLive").textContent = SOLO_HINT[mode];
+      const box = $("soloResults"); box.innerHTML = "";
+      renderSoloResult(o, { mode, target, ko }, myUrl, box);
       const log = soloLog();
-      log.items.push({ date: today(), target: target || "", heard: o.heard, better: o.better || "", clarity: typeof o.clarity === "number" ? o.clarity : null, pron: (o.pron || []).map(p => `${p.word}→${p.heard_as}`) });
-      if (log.items.length > 200) log.items = log.items.slice(-200);
+      log.items.push({ date: today(), ts: Date.now(), mode, target: target || "", ko: ko || "", heard: o.heard, better: o.better || "", clarity: typeof o.clarity === "number" ? o.clarity : null, pron: (o.pron || []).map(p => `${p.word}→${p.heard_as}`), o });
+      if (log.items.length > 150) log.items = log.items.slice(-150);
       Store.set("solo_log", log);
     } catch (e) {
       $("soloLive").textContent = "";
-      const d = el("div", "err", "분석하지 못했어요. " + errorText(e)); $("soloResults").appendChild(d);
+      const d = el("div", "err", "분석하지 못했어요. " + errorText(e)); $("soloResults").innerHTML = ""; $("soloResults").appendChild(d);
     } finally {
       transcribing = false; setMic("idle");
-      soloScroll();
+      updateHistBtn();
     }
   }
 
@@ -1349,7 +1378,8 @@ Write ONE natural, everyday spoken sentence (8-15 words) the learner could reall
     return wrap;
   }
 
-  function renderSoloResult(o, target, myUrl){
+  function renderSoloResult(o, ctx, myUrl, container, fromHistory){
+    const target = ctx.target, ko = ctx.ko;
     const card = el("div", "solo-card");
     const score = Math.max(0, Math.min(100, Math.round(Number(o.clarity) || 0)));
     const top = el("div", "score-row");
@@ -1357,7 +1387,9 @@ Write ONE natural, everyday spoken sentence (8-15 words) the learner could reall
     badge.style.background = score >= 85 ? "#2f7d5b" : score >= 65 ? "#9a6a12" : "#9c4a5b";
     const sc = el("div"); sc.appendChild(el("div", "score-lbl", "알아듣기 점수")); sc.appendChild(el("div", "score-ko", o.clarity_ko || ""));
     top.append(badge, sc); card.appendChild(top);
-    if (target) { const t = el("div", "target-small", "목표 문장: " + target); card.appendChild(t); }
+    if (target) card.appendChild(el("div", "target-small", "목표 문장: " + target));
+    if (ko) card.appendChild(el("div", "target-small", "영작할 문장: " + ko));
+    if (ko && typeof o.meaning_ok === "boolean") card.appendChild(el("div", "meaning " + (o.meaning_ok ? "ok" : "no"), (o.meaning_ok ? "✅ 뜻이 전달됐어요. " : "⚠️ 뜻이 조금 달라요. ") + (o.meaning_ko || "")));
 
     const panes = el("div", "panes");
     const left = el("div", "pane left"); left.appendChild(el("div", "pane-lbl", "👂 들린 그대로"));
@@ -1383,11 +1415,49 @@ Write ONE natural, everyday spoken sentence (8-15 words) the learner could reall
     }
     if (o.good_ko) card.appendChild(el("div", "good", "👍 " + o.good_ko));
     const row = el("div", "tools");
-    const again = el("button", null, "🔁 이 문장으로 다시 말하기");
-    again.onclick = () => { soloTarget = { sentence: o.better || o.meant || "", ko: "" }; setSoloMode("repeat"); renderTarget(); $("soloLive").textContent = "위 문장을 보고 🎤를 눌러 다시 말해 보세요"; soloScroll(true); };
+    const again = el("button", null, "🔁 이 문장으로 따라 말하기");
+    again.onclick = () => { soloTargets.repeat = { sentence: o.better || o.meant || "", ko: ko || "" }; setSoloMode("repeat"); $("soloLive").textContent = "위 문장을 보고 🎤를 눌러 다시 말해 보세요"; soloScroll(true); };
     row.appendChild(again);
+    if (!fromHistory && soloMode !== "free") { const nx = el("button", null, "➡️ 다음 문장"); nx.onclick = () => { $("soloResults").innerHTML = ""; newTarget(); soloScroll(true); }; row.appendChild(nx); }
     card.appendChild(row);
-    $("soloResults").appendChild(card);
+    container.appendChild(card);
+  }
+
+  // ---------- history (kept apart from the workspace) ----------
+  function updateHistBtn(){ const b = $("soloHistBtn"); if (b) b.textContent = `📜 지난 연습 (${soloLog().items.length})`; }
+  function showSoloHistory(on){
+    $("soloWork").classList.toggle("hidden", on);
+    $("soloHist").classList.toggle("hidden", !on);
+    $("soloBar").classList.toggle("hidden", on || !inSolo);
+    $("soloHistBtn").classList.toggle("on", on);
+    if (on) renderSoloHistory();
+    soloScroll(true);
+  }
+  $("soloHistBtn").addEventListener("click", () => showSoloHistory($("soloHist").classList.contains("hidden")));
+  function renderSoloHistory(){
+    const h = $("soloHist"); h.innerHTML = "";
+    const back = el("button", "btn ghost", "← 연습으로 돌아가기"); back.style.cssText = "width:100%;margin-bottom:12px"; back.onclick = () => showSoloHistory(false);
+    h.appendChild(back);
+    const items = soloLog().items.slice().reverse();
+    if (!items.length) { h.appendChild(el("div", "card empty", "아직 연습 기록이 없어요.")); return; }
+    let lastDate = "";
+    items.forEach(it => {
+      if (it.date !== lastDate) { lastDate = it.date; h.appendChild(el("div", "hist-date", it.date)); }
+      const row = el("button", "hist-row");
+      const sc = el("span", "hist-score", it.clarity == null ? "–" : String(it.clarity));
+      sc.style.background = it.clarity >= 85 ? "#2f7d5b" : it.clarity >= 65 ? "#9a6a12" : "#9c4a5b";
+      const tx = el("span", "hist-text");
+      tx.appendChild(el("span", "hist-mode", MODE_LABEL[it.mode || (it.target ? "repeat" : "free")] || ""));
+      tx.appendChild(el("span", null, it.ko || it.target || it.heard || ""));
+      row.append(sc, tx);
+      const detail = el("div", "hidden");
+      row.onclick = () => {
+        if (!detail.dataset.done && it.o) { renderSoloResult(it.o, { mode: it.mode, target: it.target, ko: it.ko }, null, detail, true); detail.dataset.done = "1"; }
+        else if (!it.o && !detail.dataset.done) { detail.appendChild(el("div", "solo-card", `들린 그대로: ${it.heard}\n좋은 표현: ${it.better}`)); detail.dataset.done = "1"; }
+        detail.classList.toggle("hidden");
+      };
+      h.append(row, detail);
+    });
   }
   function soloScroll(top){ const v = $("soloView"); requestAnimationFrame(() => v.scrollTop = top ? 0 : v.scrollHeight); }
 
