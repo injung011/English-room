@@ -420,6 +420,9 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   // =====================================================================
   const canRecord = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
   const useGeminiSTT = () => settings.sttMode !== "browser" && canRecord;
+  let recMode = "chat";             // "chat" or "solo"
+  const liveEl = () => $(recMode === "solo" ? "soloLive" : "liveText");
+  let lastWavUrl = null;
   let recCtx = null, recStream = null, recSrc = null, recProc = null, recChunks = [], recRate = 48000, recording = false, recT0 = 0, recTimer = null, recLevel = 0, sendAfterTranscribe = false, transcribing = false;
 
   async function startRecording(){
@@ -455,7 +458,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
 
   function renderRecMeter(){
     const sec = Math.floor((Date.now() - recT0) / 1000);
-    const live = $("liveText"); live.innerHTML = "";
+    const live = liveEl(); live.innerHTML = "";
     const row = el("div"); row.style.cssText = "display:flex;align-items:center;gap:10px;justify-content:center;font-style:normal";
     row.appendChild(el("span", null, `🔴 녹음 중 ${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`));
     const bar = el("span"); bar.style.cssText = "display:inline-block;width:90px;height:6px;border-radius:3px;background:var(--line);overflow:hidden";
@@ -478,11 +481,12 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     recording = false;
     const chunks = recChunks, rate = recRate; recChunks = [];
     cleanupRecorder();
-    $("liveText").textContent = "";
+    liveEl().textContent = "";
     setMic(busy ? "thinking" : "idle");
     if (cancel) return;
     const total = chunks.reduce((a, c) => a + c.length, 0);
-    if (total < rate * 0.5) { $("liveText").textContent = "너무 짧아요. 다시 눌러서 말해 주세요."; return; }
+    if (total < rate * 0.5) { liveEl().textContent = "너무 짧아요. 다시 눌러서 말해 주세요."; return; }
+    if (recMode === "solo") { await soloAnalyzeRecording(chunks, rate); return; }
     transcribing = true; setMic("transcribing");
     $("liveText").textContent = "받아 적는 중…";
     try {
@@ -522,9 +526,11 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     }
     return new Promise((res, rej) => {
       const fr = new FileReader();
+      const blob = new Blob([buf], { type: "audio/wav" });
+      try { lastWavUrl = URL.createObjectURL(blob); } catch { lastWavUrl = null; }
       fr.onload = () => res(String(fr.result).split(",")[1]);
       fr.onerror = () => rej(fr.error);
-      fr.readAsDataURL(new Blob([buf], { type: "audio/wav" }));
+      fr.readAsDataURL(blob);
     });
   }
 
@@ -549,14 +555,17 @@ Return ONLY JSON: {"text": "..."}`;
   function stopListening(cancel){ if (recording) stopRecording(cancel); else stopBrowser(cancel); }
 
   function setMic(state){
-    const b = $("micBtn"), l = $("micLabel"), i = $("micIcon");
+    setMicEl(state, $("micBtn"), $("micLabel"), $("micIcon"));
+    setMicEl(state === "thinking" ? "idle" : state, $("soloMic"), $("soloMicLabel"), $("soloMicIcon"), true);
+  }
+  function setMicEl(state, b, l, i, solo){
     b.classList.remove("listening", "speaking");
     b.disabled = false;
     if (!SR && !canRecord) { b.disabled = true; i.textContent = "🎤"; l.textContent = "음성 입력 미지원 · 키보드 사용"; return; }
     if (state === "listening") { b.classList.add("listening"); i.textContent = "■"; l.textContent = "듣는 중 · 다 말하면 누르기"; }
     else if (state === "speaking") { b.classList.add("speaking"); i.textContent = "🔊"; l.textContent = "말하는 중 · 누르면 끊고 말하기"; }
     else if (state === "thinking") { b.disabled = true; i.textContent = "…"; l.textContent = "생각하는 중"; }
-    else if (state === "transcribing") { b.disabled = true; i.textContent = "✍️"; l.textContent = "받아 적는 중"; }
+    else if (state === "transcribing") { b.disabled = true; i.textContent = "✍️"; l.textContent = solo ? "듣고 분석하는 중" : "받아 적는 중"; }
     else { i.textContent = "🎤"; l.textContent = "눌러서 말하기"; }
   }
 
@@ -564,6 +573,7 @@ Return ONLY JSON: {"text": "..."}`;
     unlockAudio();
     if (isListening()) { stopListening(false); return; }
     if (busy || transcribing) return;
+    recMode = "chat";
     startListening();
   });
   $("langBtn").addEventListener("click", () => {
@@ -579,8 +589,9 @@ Return ONLY JSON: {"text": "..."}`;
   // Home
   // =====================================================================
   function renderHome(){
-    inChat = false;
+    inChat = false; inSolo = false;
     stopSpeaking(); stopListening(true);
+    $("soloView").classList.add("hidden"); $("soloBar").classList.add("hidden");
     $("homeView").classList.remove("hidden");
     $("panelView").classList.add("hidden"); $("chatView").classList.remove("hidden");
     msgsEl.innerHTML = "";
@@ -590,6 +601,18 @@ Return ONLY JSON: {"text": "..."}`;
     const known = mem.profile && mem.profile.name;
     $("homeTitle").textContent = known ? `안녕하세요, ${mem.profile.call_me || mem.profile.name}!` : "English Room";
     const box = $("people"); box.innerHTML = "";
+    if (settings.apiKey) {
+      const sb = el("button", "person solo-entry");
+      const sa = el("div", "avatar", "🎙"); sa.style.background = "#7a5a2f"; sb.appendChild(sa);
+      const si = el("div", "info");
+      si.appendChild(el("div", "nm", "혼자 연습방"));
+      si.appendChild(el("div", "tl", "말하면 '들린 그대로'와 '좋은 표현'을 나란히 보여 줘요"));
+      const sl = soloLog().items; const lastS = sl[sl.length - 1];
+      si.appendChild(el("div", "last", lastS ? `최근 알아듣기 점수 ${avgClarity()}점 · ${sl.length}번 연습` : "발음이 얼마나 잘 전달되는지 확인해 보세요"));
+      sb.appendChild(si); sb.appendChild(el("div", "go", "연습하기 ›"));
+      sb.onclick = () => { unlockAudio(); openSolo(); };
+      box.appendChild(sb);
+    }
 
     if (!settings.apiKey) {
       $("homeDesc").textContent = "말로 대화하며 영어를 배우는 나만의 교실이에요. 시작하기 전에 한 번만 설정해 주세요.";
@@ -787,7 +810,7 @@ Return ONLY JSON: {"text": "..."}`;
     }
     if (m && settings.autoSpeak && CHAR === who && inChat) {
       const finished = await speak(m.text, bubble);
-      if (finished && settings.handsFree && inChat && CHAR === who && !busy) startListening();
+      if (finished && settings.handsFree && inChat && CHAR === who && !busy) { recMode = "chat"; startListening(); }
     }
   }
 
@@ -1014,7 +1037,7 @@ Return ONLY JSON: {"text": "..."}`;
   });
   function sendTyped(){
     unlockAudio();
-    if (recording) { sendAfterTranscribe = true; stopRecording(false); return; }
+    if (recording && recMode === "chat") { sendAfterTranscribe = true; stopRecording(false); return; }
     if (transcribing) { sendAfterTranscribe = true; return; }
     const v = listening ? takeHeardNow() : input.value;
     input.value = ""; autosize(); $("liveText").textContent = "";
@@ -1042,11 +1065,13 @@ Return ONLY JSON: {"text": "..."}`;
   // =====================================================================
   $("gearBtn").addEventListener("click", () => {
     const open = $("panelView").classList.contains("hidden");
-    if (open) { stopListening(true); renderPanel(); $("panelView").classList.remove("hidden"); $("chatView").classList.add("hidden"); $("composer").classList.add("hidden"); $("gearBtn").textContent = "✕"; }
+    if (open) { stopListening(true); renderPanel(); $("panelView").classList.remove("hidden"); $("chatView").classList.add("hidden"); $("composer").classList.add("hidden"); $("soloView").classList.add("hidden"); $("soloBar").classList.add("hidden"); $("gearBtn").textContent = "✕"; }
     else closePanel();
   });
   function closePanel(){
-    $("panelView").classList.add("hidden"); $("chatView").classList.remove("hidden"); $("gearBtn").textContent = "☰";
+    $("panelView").classList.add("hidden"); $("gearBtn").textContent = "☰";
+    if (inSolo) { $("soloView").classList.remove("hidden"); $("soloBar").classList.remove("hidden"); return; }
+    $("chatView").classList.remove("hidden");
     if (inChat && session.startedAt) $("composer").classList.remove("hidden");
     if (!inChat) renderHome();
   }
@@ -1137,6 +1162,16 @@ Return ONLY JSON: {"text": "..."}`;
       v.appendChild(el("h3", null, "아직 영어로 말하기 어려웠던 말"));
       const c = el("div", "card"); const u = el("ul"); E.korean_fallbacks.forEach(x => u.appendChild(el("li", null, x))); c.appendChild(u); v.appendChild(c);
     }
+    const sl = soloLog().items;
+    if (sl.length) {
+      v.appendChild(el("h3", null, "혼자 연습"));
+      const c = el("div", "card");
+      c.appendChild(el("div", null, `최근 10번 평균 알아듣기 점수: ${avgClarity()}점 (총 ${sl.length}번)`));
+      const counts = {}; sl.slice(-50).forEach(x => (x.pron || []).forEach(p => { counts[p] = (counts[p] || 0) + 1; }));
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+      if (top.length) { c.appendChild(el("div", "date", "자주 다르게 들린 발음")); top.forEach(([k, n]) => c.appendChild(el("span", "tag", `${k} (${n})`))); }
+      v.appendChild(c);
+    }
     v.appendChild(el("h3", null, "모두가 아는 나"));
     const c2 = el("div", "card");
     if (PR && (PR.name || (PR.facts && PR.facts.length))) {
@@ -1195,6 +1230,169 @@ Return ONLY JSON: {"text": "..."}`;
     const close = el("button", "btn primary", "닫기"); close.style.cssText = "width:100%;margin:16px 0 24px"; close.onclick = closePanel;
     v.appendChild(close);
   }
+
+
+  // =====================================================================
+  // Solo practice room: strict listening, side-by-side "heard" vs "better",
+  // clarity score, pronunciation tips, and replay of your own voice.
+  // =====================================================================
+  let inSolo = false, soloMode = "free", soloTarget = null;
+  const soloLog = () => { const l = Store.get("solo_log"); return l && Array.isArray(l.items) ? l : { items: [] }; };
+  const avgClarity = () => { const it = soloLog().items.slice(-10).filter(x => typeof x.clarity === "number"); return it.length ? Math.round(it.reduce((a, x) => a + x.clarity, 0) / it.length) : 0; };
+
+  const SOLO_RULES = `You are a STRICT English speaking and pronunciation coach for a Korean adult learner. You receive a recording of the learner${""} speaking, and sometimes a TARGET sentence they were trying to say.
+Most AI listeners use context to silently repair unclear speech; you must NOT do that. The learner wants to know honestly how their speech actually sounds to a native listener.
+Return ONLY one JSON object:
+{"heard": "word-by-word transcript of what is acoustically there. Do NOT use context or the target to repair unclear words. Wrap any word that was unclear or sounded like a different word in [square brackets] showing what it actually sounded like (e.g. 'I [sink] so' when 'think' sounded like 'sink'). Keep grammar mistakes, fillers and repetitions. Korean speech in Hangul.",
+ "meant": "what they most likely intended, in English",
+ "clarity": integer 0-100 = how easily an average native English listener with NO context would understand it. Be honest, not generous (90+ = effortless, 70 = understandable with some effort, 50 = several words lost, below 40 = hard to follow),
+ "clarity_ko": "one short Korean sentence explaining the score",
+ "pron": [{"word": "intended word", "heard_as": "what it sounded like", "tip_ko": "short concrete Korean tip on mouth/tongue/stress"}]  (max 4, only real issues heard in THIS recording; [] if none),
+ "better": "the natural, correct way to say what they meant (if a TARGET is given, use the target sentence)",
+ "fixes": [{"from": "their words", "to": "better words", "why_ko": "short Korean reason"}]  (max 3 grammar/word-choice points; [] if none or if they were reading the target),
+ "good_ko": "one specific thing they did well, in Korean"}`;
+
+  function openSolo(){
+    inSolo = true; inChat = false;
+    stopSpeaking();
+    setHeader({ name: "혼자 연습방", initials: "🎙", color: "#7a5a2f", tagline_ko: "말하면 들린 그대로 보여 줘요" });
+    $("homeView").classList.add("hidden"); msgsEl.innerHTML = ""; $("composer").classList.add("hidden");
+    $("chatView").classList.add("hidden"); $("homeBtn").classList.remove("hidden");
+    $("soloView").classList.remove("hidden"); $("soloBar").classList.remove("hidden");
+    $("soloResults").innerHTML = "";
+    $("soloLive").textContent = canRecord ? "🎤를 누르고 영어로 아무거나 말해 보세요. 다 말하면 ■" : "이 브라우저에서는 녹음을 쓸 수 없어요.";
+    setSoloMode(soloMode);
+    setMic("idle");
+  }
+
+  function setSoloMode(m){
+    soloMode = m;
+    document.querySelectorAll("#soloTabs button").forEach(b => b.classList.toggle("on", b.dataset.m === m));
+    if (m === "repeat") { if (!soloTarget) newTarget(); else renderTarget(); }
+    else { $("soloTarget").classList.add("hidden"); }
+  }
+  document.querySelectorAll("#soloTabs button").forEach(b => b.addEventListener("click", () => { unlockAudio(); setSoloMode(b.dataset.m); }));
+
+  function renderTarget(){
+    const t = $("soloTarget"); t.innerHTML = ""; t.classList.remove("hidden");
+    if (!soloTarget) { t.appendChild(el("div", "empty", "문장을 만드는 중…")); return; }
+    t.appendChild(el("div", "lbl", "이 문장을 소리 내어 말해 보세요"));
+    t.appendChild(el("div", "target-en", soloTarget.sentence));
+    if (soloTarget.ko) t.appendChild(el("div", "target-ko", soloTarget.ko));
+    const row = el("div", "tools");
+    const l = el("button", null, "🔊 들어 보기"); l.onclick = () => { unlockAudio(); speakWith(soloTarget.sentence, TEACHER); };
+    const n = el("button", null, "🔄 다른 문장"); n.onclick = () => newTarget();
+    row.append(l, n); t.appendChild(row);
+  }
+
+  async function newTarget(){
+    soloTarget = null; renderTarget();
+    const lvl = (mem.english && mem.english.level) || "A2-B1";
+    const facts = (mem.profile && mem.profile.facts || []).slice(0, 12).join("; ");
+    const learned = (mem.english && mem.english.learned || []).slice(-10).join("; ");
+    const recent = soloLog().items.slice(-8).map(x => x.target).filter(Boolean).join(" | ");
+    try {
+      const o = parseJSON(await llm(`You create one practice sentence for a Korean adult learning English to read aloud. Return ONLY JSON {"sentence": "...", "ko": "natural Korean translation"}.`,
+        [{ role: "user", content: `Learner level: ${lvl}. About the learner: ${facts || "unknown"}. Recently learned expressions: ${learned || "none"}. Avoid these recent sentences: ${recent || "none"}.
+Write ONE natural, everyday spoken sentence (8-15 words) the learner could really use, ideally about their own life. Often include sounds Korean speakers find hard (th, r vs l, f vs p, v vs b, z, final consonants, word stress).` }]));
+      soloTarget = o && o.sentence ? { sentence: o.sentence, ko: o.ko || "" } : { sentence: "I think the weather will be really nice this weekend.", ko: "이번 주말에는 날씨가 정말 좋을 것 같아요." };
+    } catch (e) {
+      soloTarget = { sentence: "I think the weather will be really nice this weekend.", ko: "이번 주말에는 날씨가 정말 좋을 것 같아요." };
+    }
+    if (soloMode === "repeat") renderTarget();
+  }
+
+  $("soloMic").addEventListener("click", () => {
+    unlockAudio();
+    if (recording) { stopRecording(false); return; }
+    if (transcribing || !canRecord) return;
+    if (soloMode === "repeat" && !soloTarget) return;
+    recMode = "solo";
+    startRecording();
+  });
+
+  async function soloAnalyzeRecording(chunks, rate){
+    transcribing = true; setMic("transcribing");
+    $("soloLive").textContent = "까다롭게 듣고 분석하는 중…";
+    const target = soloMode === "repeat" && soloTarget ? soloTarget.sentence : null;
+    try {
+      const b64 = await wavBase64(chunks, rate);
+      const myUrl = lastWavUrl;
+      const raw = await llm(SOLO_RULES, [{ role: "user", parts: [
+        { inlineData: { mimeType: "audio/wav", data: b64 } },
+        { text: target ? `TARGET sentence the learner tried to say: "${target}"` : "No target: the learner spoke freely." }
+      ] }]);
+      const o = parseJSON(raw);
+      if (!o || typeof o.heard !== "string") throw new Error("분석 결과를 읽지 못했어요");
+      $("soloLive").textContent = "";
+      renderSoloResult(o, target, myUrl);
+      const log = soloLog();
+      log.items.push({ date: today(), target: target || "", heard: o.heard, better: o.better || "", clarity: typeof o.clarity === "number" ? o.clarity : null, pron: (o.pron || []).map(p => `${p.word}→${p.heard_as}`) });
+      if (log.items.length > 200) log.items = log.items.slice(-200);
+      Store.set("solo_log", log);
+    } catch (e) {
+      $("soloLive").textContent = "";
+      const d = el("div", "err", "분석하지 못했어요. " + errorText(e)); $("soloResults").appendChild(d);
+    } finally {
+      transcribing = false; setMic("idle");
+      soloScroll();
+    }
+  }
+
+  function heardNode(text){
+    // [word] -> highlighted unclear word
+    const wrap = el("div", "pane-text");
+    String(text || "").split(/(\[[^\]]+\])/).forEach(part => {
+      if (/^\[[^\]]+\]$/.test(part)) wrap.appendChild(el("mark", null, part.slice(1, -1)));
+      else if (part) wrap.appendChild(document.createTextNode(part));
+    });
+    return wrap;
+  }
+
+  function renderSoloResult(o, target, myUrl){
+    const card = el("div", "solo-card");
+    const score = Math.max(0, Math.min(100, Math.round(Number(o.clarity) || 0)));
+    const top = el("div", "score-row");
+    const badge = el("div", "score", String(score));
+    badge.style.background = score >= 85 ? "#2f7d5b" : score >= 65 ? "#9a6a12" : "#9c4a5b";
+    const sc = el("div"); sc.appendChild(el("div", "score-lbl", "알아듣기 점수")); sc.appendChild(el("div", "score-ko", o.clarity_ko || ""));
+    top.append(badge, sc); card.appendChild(top);
+    if (target) { const t = el("div", "target-small", "목표 문장: " + target); card.appendChild(t); }
+
+    const panes = el("div", "panes");
+    const left = el("div", "pane left"); left.appendChild(el("div", "pane-lbl", "👂 들린 그대로"));
+    left.appendChild(heardNode(o.heard));
+    if (/\[/.test(o.heard || "")) left.appendChild(el("div", "pane-note", "노란 단어는 잘 안 들렸거나 다른 말처럼 들린 곳이에요"));
+    if (myUrl) { const pb = el("button", "mini", "▶️ 내 목소리 듣기"); pb.onclick = () => { stopSpeaking(); try { new Audio(myUrl).play(); } catch {} }; left.appendChild(pb); }
+    const right = el("div", "pane right"); right.appendChild(el("div", "pane-lbl", "✨ 이렇게 말하면 좋아요"));
+    right.appendChild(el("div", "pane-text", o.better || o.meant || ""));
+    const sb = el("button", "mini", "🔊 들어 보기"); sb.onclick = () => { unlockAudio(); speakWith(o.better || o.meant || "", TEACHER); }; right.appendChild(sb);
+    panes.append(left, right); card.appendChild(panes);
+
+    if (Array.isArray(o.pron) && o.pron.length) {
+      card.appendChild(el("div", "sec-lbl", "🗣 발음"));
+      const ul = el("ul");
+      o.pron.slice(0, 4).forEach(p => { const li = el("li"); const b = el("b", null, p.word); li.append(b, ` → "${p.heard_as || "?"}"처럼 들렸어요. ${p.tip_ko || ""}`); ul.appendChild(li); });
+      card.appendChild(ul);
+    }
+    if (Array.isArray(o.fixes) && o.fixes.length) {
+      card.appendChild(el("div", "sec-lbl", "✏️ 표현"));
+      const ul = el("ul");
+      o.fixes.slice(0, 3).forEach(f => { const li = el("li"); li.append(el("s", null, f.from || ""), " → ", el("b", null, f.to || ""), f.why_ko ? `  ${f.why_ko}` : ""); ul.appendChild(li); });
+      card.appendChild(ul);
+    }
+    if (o.good_ko) card.appendChild(el("div", "good", "👍 " + o.good_ko));
+    const row = el("div", "tools");
+    const again = el("button", null, "🔁 이 문장으로 다시 말하기");
+    again.onclick = () => { soloTarget = { sentence: o.better || o.meant || "", ko: "" }; setSoloMode("repeat"); renderTarget(); $("soloLive").textContent = "위 문장을 보고 🎤를 눌러 다시 말해 보세요"; soloScroll(true); };
+    row.appendChild(again);
+    card.appendChild(row);
+    $("soloResults").appendChild(card);
+  }
+  function soloScroll(top){ const v = $("soloView"); requestAnimationFrame(() => v.scrollTop = top ? 0 : v.scrollHeight); }
+
+  // speak with a specific character's voice (used by the solo room)
+  function speakWith(text, c){ const prev = CHAR; CHAR = c; const p = speak(text); CHAR = prev; return p; }
 
   // =====================================================================
   // Boot

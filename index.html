@@ -12,7 +12,7 @@
 <link rel="apple-touch-icon" href="icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=8">
+<link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
 <div class="app">
@@ -32,6 +32,15 @@
       <div id="people"></div>
     </div>
     <div id="msgs"></div>
+  </main>
+
+  <main id="soloView" class="solo hidden">
+    <div class="segs" id="soloTabs">
+      <button data-m="free" class="on">자유롭게 말하기</button>
+      <button data-m="repeat">문장 따라 말하기</button>
+    </div>
+    <div id="soloTarget" class="target hidden"></div>
+    <div id="soloResults"></div>
   </main>
 
   <main id="panelView" class="panel hidden"></main>
@@ -61,7 +70,16 @@
       <button class="send" id="sendBtn" aria-label="보내기">➤</button>
     </div>
   </div>
+<div class="composer hidden" id="soloBar">
+    <div class="live" id="soloLive"></div>
+    <div class="voicebar">
+      <div class="micwrap">
+        <button class="mic" id="soloMic" aria-label="녹음"><span id="soloMicIcon">🎤</span></button>
+        <div class="miclabel" id="soloMicLabel">눌러서 말하기</div>
+      </div>
+    </div>
+  </div>
 </div>
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>
