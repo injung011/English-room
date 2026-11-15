@@ -22,9 +22,8 @@ Background: born in Portland, Maine; taught English and literature at a Boston h
 - You LEAD the conversation. The student finds it hard to drive a conversation in English, so you propose topics and situations, ask questions, and keep things moving. End almost every turn with ONE easy, concrete question or a clear next step. If the student is in the middle of telling a story, react genuinely and ask a follow-up instead of changing the subject.
 - Talk like a real person, not a textbook: short spoken-style turns (usually 1-3 sentences, max ~45 words). Match vocabulary and speed to the student's level; slightly above it is ideal.
 - Vary what you do: everyday chat (their day, work, family, plans, memories), your own stories and opinions, and situations or role-plays that fit your relationship. Stay in character, but still lead.
-- Corrections: at most ONE per turn, only for a meaningful or repeated grammar/word-choice error. Put it in "correction"; in "say" you may also naturally recast the right form. If the sentence was fine, correction is null. Keep the flow.
 - Praise: occasionally (not every turn), specific and sincere. Put it in "praise".
-- Korean: the student may mix in or switch to Korean when stuck. Understand it, never scold, give the natural English version in "correction" (you_said = their Korean, better = natural English, why_ko = brief tip), and continue in English.
+- Korean: the student may mix in or switch to Korean when stuck. Understand it, never scold, and continue in English.
 - Questions about English (in Korean or English): answer clearly; put a short Korean explanation in "note_ko" with an example, then offer a quick try.
 - Memory: use the memory below naturally - remember their name, life, and stories; follow up on things they mentioned; recycle expressions they learned and target their weak patterns. Never recite the memory back as a list.
 - Hints: always give 2-3 short example replies the student could say next, at their level, in English.
@@ -38,6 +37,14 @@ Background: born in Portland, Maine; taught English and literature at a Boston h
 "new_character": {"name": "how the student will call them, e.g. Jake", "initials": "2 letters", "gender": "male" or "female", "role_ko": "관계 (예: 회사 동료)", "tagline_ko": "나이 · 사는 곳 · 직업 (Korean, short)",
   "persona": "Detailed English description written as 'You are ...': full name, age, gender, hometown, where they live now, job, family, personality, interests, how they talk (slang, formality, humor), and how they know the student",
   "teach_style": "How this person helps with English, consistent with the relationship (e.g. a friend corrects rarely and casually and teaches slang; a coworker helps with workplace English)"}`;
+
+  function correctionRules(){
+    const lvl = settings.correctLevel || "off";
+    if (lvl === "off") return `CORRECTIONS: TURNED OFF by the student. Never correct their English: "correction" must always be null, and do not recast or point out mistakes in "say" either. Just respond to WHAT they said, like a natural conversation partner. Only exceptions: (1) if they used Korean, put the natural English way to say that part in "note_ko" (e.g. "'회의가 길었어'는 영어로 'The meeting dragged on.'"); (2) if they explicitly ask about their English, answer in "note_ko".`;
+    const common = `When you correct: fix only the ONE most important point. "you_said" = just the few words that were wrong (not the whole sentence); "better" = just those words fixed (not a rewritten, polished sentence). Never rewrite their whole sentence. If a phrase looks like a speech-recognition mishearing (odd words that don't fit), don't correct it; ask what they meant instead. If they used Korean, you may use "correction" to give the English for that part.`;
+    if (lvl === "light") return `CORRECTIONS: LIGHT. Correct rarely: only when an error makes the meaning unclear, or the same error has come up again and again. Most turns "correction" is null. ${common}`;
+    return `CORRECTIONS: NORMAL. At most one per turn, only for a meaningful or repeated grammar/word-choice error; otherwise null. ${common}`;
+  }
 
   function outputSpec(c){
     return `OUTPUT: reply with ONLY one JSON object with these keys:
@@ -87,7 +94,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     keys(){ const out = []; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(P)) out.push(k.slice(P.length)); } } catch {} return out; }
   };
   const settings = Object.assign({
-    apiKey: "", model: "", autoSpeak: true, autoSend: false, handsFree: false, rate: 1.0, recLang: "en-US", voices: {}
+    apiKey: "", model: "", autoSpeak: true, autoSend: false, handsFree: false, rate: 1.0, recLang: "en-US", voices: {}, correctLevel: "off"
   }, Store.get("settings") || {});
   const saveSettings = () => Store.set("settings", settings);
   if (!settings.sendV2) { settings.autoSend = false; settings.sendV2 = true; Store.set("settings", settings); }
@@ -710,7 +717,7 @@ Return ONLY JSON: {"text": "..."}`;
 
   function buildConversation(action){
     const A = actionsFor(CHAR);
-    const system = `${CHAR.persona}\n\nYOUR ROLE IN THE STUDENT'S ENGLISH LEARNING: ${CHAR.teach_style || ""}\n\n${BASE_RULES}\n\n${CHAR.builtin ? CREATE_RULES + "\n\n" : ""}${outputSpec(CHAR)}\n\n${memoryBlock()}`;
+    const system = `${CHAR.persona}\n\nYOUR ROLE IN THE STUDENT'S ENGLISH LEARNING: ${CHAR.teach_style || ""}\n\n${BASE_RULES}\n\n${correctionRules()}\n\n${CHAR.builtin ? CREATE_RULES + "\n\n" : ""}${outputSpec(CHAR)}\n\n${memoryBlock()}`;
     const msgs = session.messages.slice(-40);
     const out = [];
     const push = (role, content) => {
@@ -757,7 +764,7 @@ Return ONLY JSON: {"text": "..."}`;
       if (typeof o.say !== "string") o.say = String(o.say || raw);
       m = {
         role: "teacher", text: o.say, ko: o.say_ko || "",
-        correction: o.correction && o.correction.better ? o.correction : null,
+        correction: (settings.correctLevel || "off") !== "off" && o.correction && o.correction.better ? o.correction : null,
         praise: o.praise || null, note: o.note_ko || null,
         hints: Array.isArray(o.hints) ? o.hints.slice(0,3) : [], ts: Date.now()
       };
@@ -957,6 +964,9 @@ Return ONLY JSON: {"text": "..."}`;
     msgsEl.appendChild(d); scrollDown();
   }
 
+  const CORR_LABEL = { off: "끔", light: "가끔", normal: "보통" };
+  function updateCorrBtn(){ const b = document.querySelector('#actions button[data-a="corr"]'); if (b) b.textContent = `✏️ 고쳐주기: ${CORR_LABEL[settings.correctLevel || "off"]}`; }
+
   async function resetConversation(){
     const b = document.querySelector('#actions button[data-a="reset"]');
     if (!b.dataset.armed) {
@@ -977,7 +987,7 @@ Return ONLY JSON: {"text": "..."}`;
   function setBusy(v){
     busy = v;
     $("sendBtn").disabled = v;
-    document.querySelectorAll("#actions button").forEach(b => b.disabled = v && b.dataset.a !== "reset");
+    document.querySelectorAll("#actions button").forEach(b => b.disabled = v && b.dataset.a !== "reset" && b.dataset.a !== "corr");
     $("status").textContent = v ? "생각하는 중…" : (CHAR.tagline_ko || CHAR.role_ko || "");
     setMic(v ? "thinking" : "idle");
   }
@@ -1017,6 +1027,7 @@ Return ONLY JSON: {"text": "..."}`;
     unlockAudio();
     const a = b.dataset.a;
     if (a === "reset") { resetConversation(); return; }
+    if (a === "corr") { const order = ["off", "light", "normal"]; settings.correctLevel = order[(order.indexOf(settings.correctLevel || "off") + 1) % 3]; saveSettings(); updateCorrBtn(); return; }
     if (a !== "end") { stopListening(true); studentSend("", a); return; }
     if (busy) return;
     if (session.messages.filter(m => m.role === "student" && !m.meta).length < 2) { showError("조금 더 대화한 뒤에 마칠 수 있어요.", null); return; }
@@ -1058,6 +1069,11 @@ Return ONLY JSON: {"text": "..."}`;
       sel.onchange = () => { settings.sttMode = sel.value; saveSettings(); updateSttUI(); };
       row("말 받아 적기", sel);
     }
+    const cs = document.createElement("select");
+    [["off", "끔 — 고치지 않고 대화만"], ["light", "가끔 — 뜻이 안 통하거나 반복될 때만"], ["normal", "보통 — 중요한 실수 한 곳씩"]].forEach(([v, t]) => { const o = el("option", null, t); o.value = v; cs.appendChild(o); });
+    cs.value = settings.correctLevel || "off";
+    cs.onchange = () => { settings.correctLevel = cs.value; saveSettings(); updateCorrBtn(); };
+    row("영어 고쳐주기", cs, "꺼도 대화가 끝나면 '기록'에는 자주 하는 실수가 정리돼요.");
     row("■ 누르면 바로 보내기", chk("autoSend"), "끄면(기본) 말한 내용이 입력창에 들어가고, 확인한 뒤 ➤ 를 눌러 보내요.");
     row("핸즈프리 (읽어 준 뒤 바로 듣기)", chk("handsFree"), "상대방 말이 끝나면 마이크가 자동으로 켜져요. 아이폰에서는 안 될 수 있어요.");
     const rl = el("span", null, `말하기 속도 ${settings.rate.toFixed(2)}`);
@@ -1184,6 +1200,7 @@ Return ONLY JSON: {"text": "..."}`;
   // Boot
   // =====================================================================
   updateLangBtn();
+  updateCorrBtn();
   setMic("idle");
   if (!SR && !canRecord) { $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("hidden"); }
   function updateSttUI(){ $("langBtn").classList.toggle("hidden", useGeminiSTT() || !SR); }
