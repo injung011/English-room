@@ -87,9 +87,10 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     keys(){ const out = []; try { for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k && k.startsWith(P)) out.push(k.slice(P.length)); } } catch {} return out; }
   };
   const settings = Object.assign({
-    apiKey: "", model: "", autoSpeak: true, autoSend: true, handsFree: false, rate: 1.0, recLang: "en-US", voices: {}
+    apiKey: "", model: "", autoSpeak: true, autoSend: false, handsFree: false, rate: 1.0, recLang: "en-US", voices: {}
   }, Store.get("settings") || {});
   const saveSettings = () => Store.set("settings", settings);
+  if (!settings.sendV2) { settings.autoSend = false; settings.sendV2 = true; Store.set("settings", settings); }
   if (!settings.modelChosen && settings.model && !/flash-lite/.test(settings.model)) { settings.model = ""; saveSettings(); }
 
   // =====================================================================
@@ -309,57 +310,99 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   // =====================================================================
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
   const isAndroid = /Android/i.test(navigator.userAgent);
-  let rec = null, listening = false, heardFinal = "", heardInterim = "", silenceTimer = null, cancelListen = false;
+  // The student decides when they're done: we keep listening (restarting the recognizer
+  // whenever the browser ends it on a pause) until they press stop.
+  let rec = null, listening = false, wantListen = false, accText = "", curFinal = "", curInterim = "", listenStart = 0, cancelListen = false;
+  const MAX_LISTEN_MS = 3 * 60 * 1000;
+  const joinText = (...xs) => xs.map(x => (x || "").trim()).filter(Boolean).join(" ");
 
   function startListening(){
     if (!SR || listening || busy) return;
     stopSpeaking();
-    heardFinal = ""; heardInterim = ""; cancelListen = false;
+    accText = input.value.trim();   // keep anything already in the box, so they can add more
+    curFinal = ""; curInterim = ""; cancelListen = false;
+    wantListen = true; listening = true; listenStart = Date.now();
+    setMic("listening");
+    $("liveText").textContent = "듣고 있어요… 다 말하면 ■ 를 누르세요";
+    spawn();
+  }
+
+  function spawn(){
     try {
       rec = new SR();
       rec.lang = settings.recLang;
       rec.interimResults = true;
       rec.continuous = !isAndroid;
       rec.maxAlternatives = 1;
-    } catch (e) { showError("이 브라우저에서는 음성 인식을 쓸 수 없어요. 키보드로 입력해 주세요."); return; }
-    rec.onresult = ev => {
+    } catch (e) { wantListen = false; finishListening(); showError("이 브라우저에서는 음성 인식을 쓸 수 없어요. 키보드로 입력해 주세요."); return; }
+    const me = rec;
+    me.onresult = ev => {
+      if (rec !== me) return;
       let fin = "", inter = "";
       for (let i = 0; i < ev.results.length; i++) {
         const r = ev.results[i];
         if (r.isFinal) fin += r[0].transcript + " "; else inter += r[0].transcript + " ";
       }
-      heardFinal = fin.trim(); heardInterim = inter.trim();
-      $("liveText").textContent = (heardFinal + " " + heardInterim).trim();
-      clearTimeout(silenceTimer);
-      silenceTimer = setTimeout(() => { try { rec && rec.stop(); } catch {} }, 2600);
+      curFinal = fin.trim(); curInterim = inter.trim();
+      showHeard();
     };
-    rec.onerror = ev => {
+    me.onerror = ev => {
       if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
-        cancelListen = true;
-        showError("마이크 사용이 허용되지 않았어요. 브라우저 설정에서 이 사이트의 마이크를 허용해 주세요. (아이폰은 설정 → Safari → 마이크, 그리고 설정 → Siri에서 받아쓰기가 켜져 있어야 해요.)");
+        wantListen = false;
+        showError("마이크 사용이 허용되지 않았어요. 크롬 주소창 왼쪽 아이콘 → 권한 → 마이크를 허용해 주세요. (아이폰은 설정 → Safari → 마이크, 그리고 설정 → Siri에서 받아쓰기가 켜져 있어야 해요.)");
       } else if (ev.error === "language-not-supported") {
-        cancelListen = true; showError("이 언어의 음성 인식을 지원하지 않아요.");
+        wantListen = false; showError("이 언어의 음성 인식을 지원하지 않아요.");
       } else if (ev.error === "network") {
-        cancelListen = true; showError("음성 인식에 인터넷 연결이 필요해요.");
+        wantListen = false; showError("음성 인식에 인터넷 연결이 필요해요.");
       }
+      // "no-speech" / "aborted": just keep going (onend restarts)
     };
-    rec.onend = () => {
-      clearTimeout(silenceTimer);
-      listening = false; rec = null;
-      const text = (heardFinal + " " + heardInterim).trim();
-      if (cancelListen) { $("liveText").textContent = ""; setMic("idle"); return; }
-      if (!text) { $("liveText").textContent = "잘 못 들었어요. 다시 눌러서 말해 주세요."; setMic("idle"); return; }
-      $("liveText").textContent = "";
-      if (settings.autoSend) studentSend(text);
-      else { openTyping(text); setMic("idle"); }
+    me.onend = () => {
+      if (rec !== me) return;
+      accText = joinText(accText, curFinal || curInterim);
+      curFinal = ""; curInterim = "";
+      rec = null;
+      if (wantListen && Date.now() - listenStart < MAX_LISTEN_MS) setTimeout(() => { if (wantListen) spawn(); else finishListening(); }, 120);
+      else finishListening();
     };
-    try { rec.start(); listening = true; setMic("listening"); $("liveText").textContent = "듣고 있어요…"; }
-    catch (e) { listening = false; setMic("idle"); }
+    try { me.start(); } catch (e) { rec = null; wantListen = false; finishListening(); }
   }
+
+  function showHeard(){
+    const t = joinText(accText, curFinal, curInterim);
+    input.value = t; autosize();
+    if (t) { $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("on"); }
+    $("liveText").textContent = t ? "듣고 있어요… 다 말하면 ■ 를 누르세요" : "듣고 있어요…";
+  }
+
+  function finishListening(){
+    if (!listening) return;
+    listening = false;
+    setMic(busy ? "thinking" : "idle");
+    $("liveText").textContent = "";
+    if (cancelListen) { input.value = ""; autosize(); return; }
+    const text = joinText(accText);
+    input.value = text; autosize();
+    if (!text) { $("liveText").textContent = "잘 못 들었어요. 다시 눌러서 말해 주세요."; return; }
+    if (settings.autoSend) { sendTyped(); return; }
+    $("typeRow").classList.remove("hidden"); $("kbBtn").classList.add("on");
+    $("liveText").textContent = "고칠 곳이 있으면 고치고 ➤ 보내기를 누르세요. 🎤를 누르면 이어서 말할 수 있어요.";
+  }
+
   function stopListening(cancel){
-    if (!rec) return;
+    if (!listening) return;
     cancelListen = !!cancel;
-    try { rec.stop(); } catch {}
+    wantListen = false;
+    if (rec) { try { rec.stop(); } catch { rec = null; finishListening(); } }
+    else finishListening();
+  }
+  // Grab everything heard so far right now (for pressing send while still listening).
+  function takeHeardNow(){
+    const t = joinText(accText, curFinal, curInterim);
+    wantListen = false; cancelListen = true;
+    if (rec) { const r = rec; rec = null; try { r.abort(); } catch {} }
+    listening = false; setMic(busy ? "thinking" : "idle"); $("liveText").textContent = "";
+    return t;
   }
 
   function setMic(state){
@@ -367,7 +410,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     b.classList.remove("listening", "speaking");
     b.disabled = false;
     if (!SR) { b.disabled = true; i.textContent = "🎤"; l.textContent = "음성 인식 미지원 · 키보드 사용"; return; }
-    if (state === "listening") { b.classList.add("listening"); i.textContent = "■"; l.textContent = "듣는 중 · 누르면 보내기"; }
+    if (state === "listening") { b.classList.add("listening"); i.textContent = "■"; l.textContent = "듣는 중 · 다 말하면 누르기"; }
     else if (state === "speaking") { b.classList.add("speaking"); i.textContent = "🔊"; l.textContent = "말하는 중 · 누르면 끊고 말하기"; }
     else if (state === "thinking") { b.disabled = true; i.textContent = "…"; l.textContent = "생각하는 중"; }
     else { i.textContent = "🎤"; l.textContent = "눌러서 말하기"; }
@@ -822,7 +865,13 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
   input.addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.matchMedia("(pointer:fine)").matches) { e.preventDefault(); sendTyped(); }
   });
-  function sendTyped(){ unlockAudio(); const v = input.value; input.value = ""; autosize(); studentSend(v); }
+  function sendTyped(){
+    unlockAudio();
+    const v = listening ? takeHeardNow() : input.value;
+    input.value = ""; autosize(); $("liveText").textContent = "";
+    if (SR) { $("typeRow").classList.add("hidden"); $("kbBtn").classList.remove("on"); }
+    studentSend(v);
+  }
   $("sendBtn").addEventListener("click", sendTyped);
 
   document.querySelectorAll("#actions button").forEach(b => b.addEventListener("click", async () => {
@@ -863,7 +912,7 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     const chk = (key, after) => { const c = document.createElement("input"); c.type = "checkbox"; c.checked = !!settings[key]; c.onchange = () => { settings[key] = c.checked; saveSettings(); after && after(); }; return c; };
 
     row("대답 끝나면 소리로 읽어 주기", chk("autoSpeak"));
-    row("말 끝나면 자동으로 보내기", chk("autoSend"), "끄면 인식된 문장을 확인하고 고친 뒤 보낼 수 있어요.");
+    row("■ 누르면 바로 보내기", chk("autoSend"), "끄면(기본) 말한 내용이 입력창에 들어가고, 확인한 뒤 ➤ 를 눌러 보내요.");
     row("핸즈프리 (읽어 준 뒤 바로 듣기)", chk("handsFree"), "상대방 말이 끝나면 마이크가 자동으로 켜져요. 아이폰에서는 안 될 수 있어요.");
     const rl = el("span", null, `말하기 속도 ${settings.rate.toFixed(2)}`);
     const rg = document.createElement("input"); rg.type = "range"; rg.min = "0.6"; rg.max = "1.3"; rg.step = "0.05"; rg.value = settings.rate;
