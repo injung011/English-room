@@ -144,6 +144,15 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
     return e;
   }
 
+  const noThinkingCfg = {};
+  function thinkingFor(model){
+    if (!model || noThinkingCfg[model]) return null;
+    const m = model.match(/gemini-(\d+(?:\.\d+)?)/); const v = m ? parseFloat(m[1]) : 0;
+    if (v >= 3) return { thinkingLevel: "low" };
+    if (v >= 2.5 && /flash/.test(model)) return { thinkingBudget: 0 };
+    return null;
+  }
+
   async function llm(system, messages){
     if (!settings.apiKey) { const e = new Error("no key"); e.code = "no_key"; throw e; }
     if (!settings.model) {
@@ -155,11 +164,18 @@ Rules: merge with the current memory - keep existing facts unless contradicted, 
       contents: messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
       generationConfig: { responseMimeType: "application/json", temperature: 0.9 }
     };
+    // Conversation needs speed, not deep reasoning: keep the model's "thinking" as light as it allows.
+    const tc = thinkingFor(settings.model);
+    if (tc) body.generationConfig.thinkingConfig = tc;
     let r;
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < 3; attempt++) {
       r = await fetch(`${API}/models/${encodeURIComponent(settings.model)}:generateContent`, {
         method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": settings.apiKey }, body: JSON.stringify(body)
       });
+      if (r.status === 400 && body.generationConfig.thinkingConfig) {
+        const msg = await r.clone().text();
+        if (/think/i.test(msg)) { delete body.generationConfig.thinkingConfig; noThinkingCfg[settings.model] = true; continue; }
+      }
       if (r.status !== 503 && r.status !== 500) break;
       await new Promise(res => setTimeout(res, 1200 + Math.random() * 800));
     }
